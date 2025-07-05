@@ -7,6 +7,10 @@ import unicodedata
 import random
 import time
 import os
+from datetime import datetime, timedelta
+from threading import Thread
+
+from flask import Flask
 
 # Static list of common User-Agents (to avoid fake_useragent issues)
 USER_AGENTS = [
@@ -29,6 +33,12 @@ session.headers.update(headers)
 
 # In-memory cache to avoid duplicate posts (bonus)
 seen_notices = set()
+
+# In-memory cache for job listings (5 hours)
+job_cache = {
+    "data": None,
+    "last_updated": None
+}
 
 districts = [
     "Balod", "Baloda Bazar", "Balrampur-Ramanujganj", "Bastar", "Bemetara",
@@ -84,11 +94,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def get_swami_jobs(district):
     url = recruitment_urls.get(district)
     try:
-        # Rotate User-Agent for each request from static list
         session.headers["User-Agent"] = random.choice(USER_AGENTS)
-        # Polite delay (1–2 seconds, shorter for cloud)
         time.sleep(random.uniform(1, 2))
-        # Retry mechanism (up to 3 tries)
         for attempt in range(3):
             try:
                 r = session.get(url, timeout=10)
@@ -102,7 +109,6 @@ def get_swami_jobs(district):
             return []
         soup = BeautifulSoup(r.text, "html.parser")
         notices = []
-        # Scan all relevant tags
         tags = soup.find_all(["li", "div", "p", "a"])
         for tag in tags:
             text = normalize_text(tag.get_text(" ", strip=True))
@@ -128,50 +134,80 @@ def get_swami_jobs(district):
         logging.error(f"Failed for {district}: {e}")
         return []
 
-
-async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    progress_msg = await update.message.reply_text("Fetching Swami Atmanand job listings... please wait ⏳")
-    found_districts = []
+def scrape_all_jobs():
+    found_jobs = []
     failed_districts = []
-    total = len(districts)
-    for idx, district in enumerate(districts, 1):
+    for district in districts:
         notices = get_swami_jobs(district)
         if notices:
-            found_districts.append(district)
+            for notice in notices:
+                found_jobs.append(notice)
         elif notices == []:
-            # If the notices list is empty, check if it was due to an error (logged)
-            # We'll treat all empty results as possible failures for reporting
             url = recruitment_urls.get(district)
             try:
-                # Try a simple request to see if the site is up
                 session.get(url, timeout=5)
             except Exception:
                 failed_districts.append(district)
-        # Update progress bar
-        bar_len = 20
-        filled_len = int(bar_len * idx // total)
-        bar = "█" * filled_len + "░" * (bar_len - filled_len)
-        progress_text = f"Progress: [{bar}] {idx}/{total} districts checked"
-        await progress_msg.edit_text(progress_text)
-    # Prepare result message
-    if found_districts:
-        district_list = "\n".join(
-            f"- [{d.title()}]({recruitment_urls[d]})"
-            for d in found_districts
-        )
-        message = f"Districts with Swami Atmanand job postings:\n{district_list}"
-    else:
-        message = "No districts found with 'स्वामी आत्मानंद' job postings right now."
-    # Add failed districts info
+    return found_jobs, failed_districts
+
+def get_cached_jobs():
+    now = datetime.utcnow()
+    if (
+        job_cache["data"] is not None
+        and job_cache["last_updated"] is not None
+        and now - job_cache["last_updated"] < timedelta(hours=5)
+    ):
+        return job_cache["data"], job_cache.get("failed_districts", [])
+    # Cache expired or empty, re-scrape
+    found_jobs, failed_districts = scrape_all_jobs()
+    job_cache["data"] = found_jobs
+    job_cache["last_updated"] = now
+    job_cache["failed_districts"] = failed_districts
+    return found_jobs, failed_districts
+
+def format_jobs_markdown(jobs):
+    if not jobs:
+        return "No Swami Atmanand job postings found right now."
+    lines = []
+    for job in jobs:
+        # Markdown: [Title](link) — District
+        title = job["title"].replace('[', '').replace(']', '')  # avoid Markdown breakage
+        district = job["district"]
+        link = job["link"]
+        lines.append(f"- [{title}]({link})\n  _District:_ *{district}*")
+    return "\n\n".join(lines)
+
+async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    progress_msg = await update.message.reply_text("Fetching Swami Atmanand job listings... please wait ⏳")
+    jobs, failed_districts = get_cached_jobs()
+    message = format_jobs_markdown(jobs)
     if failed_districts:
         failed_list = "\n".join(f"- {d.title()}" for d in failed_districts)
         message += f"\n\n❗ Failed to fetch from these districts:\n{failed_list}"
-    await progress_msg.edit_text(message, disable_web_page_preview=True)
+    await progress_msg.edit_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
-if __name__ == "__main__":
+# --- Flask web server for /ping ---
+flask_app = Flask(__name__)
+
+@flask_app.route("/ping")
+def ping():
+    return "I'm alive ✅"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+def run_telegram_bot():
     logging.basicConfig(level=logging.INFO)
     BOT_TOKEN = os.environ.get("BOT_TOKEN")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("jobs", jobs))
     app.run_polling()
+
+if __name__ == "__main__":
+    # Start Flask server in a thread
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    # Start Telegram bot (main thread)
+    run_telegram_bot()
