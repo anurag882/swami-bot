@@ -79,7 +79,7 @@ def get_swami_jobs(district):
         # Rotate User-Agent for each request
         session.headers["User-Agent"] = ua.random
         # Polite delay (5–10 seconds)
-        # time.sleep(random.uniform(5, 10))
+        time.sleep(random.uniform(5, 10))
         r = session.get(url, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
         notices = []
