@@ -7,6 +7,7 @@ import unicodedata
 import random
 import time
 from fake_useragent import UserAgent
+import os
 
 ua = UserAgent()
 headers = {
@@ -151,7 +152,7 @@ async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    BOT_TOKEN = "8030767533:AAF1hEY6_5bpTOMwipEMk6eChHxPm7fSy6E"
+    BOT_TOKEN = os.environ.get("BOT_TOKEN")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("jobs", jobs))
